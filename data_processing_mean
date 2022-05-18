@@ -1,0 +1,343 @@
+'''
+总结一下，同一个站点，同一个品种，同一年的话，要计算平均，合并成同一个
+先提取所有的站点，遍历站点名，例如站点1
+站点1之后，遍历所有的年份，例如2013
+然后遍历品种，例如品种1，把年份找到，然后计算平均值，最大值，最小值，方差，个数。然后存成一个多列的文件，包括
+
+年份，站点id，经度，纬度，品种，平均值，最大值，最小值，方差，数据个数
+这个文件v=3
+'''
+import numpy as np
+import pandas as pd
+import os
+import netCDF4 as nc
+from sklearn.model_selection import train_test_split
+def find_year(start_year,end_year,filename):
+    '''
+    找到start_year和end_year之间的点
+    '''
+    phe_all = pd.read_csv(filename, sep=";")  # phe_data.iloc[0,0]
+    phe_data = phe_all.loc[:, ["year", "day_of_year", "site_id", "site_latitude", "site_longitude", "taxon_id"]]
+    last = phe_data[(phe_data["year"] > start_year-1) & (phe_data["year"] < end_year+1)]
+    return last
+
+def geo_idx(dd, dd_array):
+    '''
+    找到最近的格点的函数
+    '''
+    geo_idx = (np.abs(dd_array - dd)).argmin()
+    return geo_idx
+def find_nc_year_month_day(file_name):
+    '''
+    找到nc数据的年月日的序列
+    '''
+    temp_data = nc.Dataset(filename)
+    time = temp_data['time']
+    times = nc.num2date(time[:], time.units, only_use_cftime_datetimes=False).data
+    year = np.zeros((len(time),))
+    month = np.zeros((len(time),))
+    day = np.zeros((len(time),))
+    for i in range(len(time)):
+        year[i,] = times[i].year
+        month[i,] = times[i].month
+        day[i,] = times[i].day
+    return year, month, day
+
+
+
+def find_month_a_b(sta,end,year_nc,year_pi,month_nc):
+    '''
+
+    :param sta: 前一年的月份
+    :param end: 今年的月份
+    :param year_nc: 所有的逐月数据的时间序列
+    :param year_pi: 观测到的物候期的那一年
+    :return:
+    '''
+    k_month0 = ((month_nc >= sta))
+    k_month1 = ((month_nc <= end))
+    k_year0 = (year_nc > year_pi - 2) & (year_nc < year_pi)
+    k_year1 = (year_nc > year_pi - 1) & (year_nc < year_pi + 1)
+    k1 = ((k_month0) & (k_year0))
+    k2 = ((k_month1) & (k_year1))
+    data_loc_tas = np.where((k1) | (k2))
+    return data_loc_tas
+
+#lasso 回归
+def lasso_feature_selection(X_train,Y_train,savepath,columns,v):
+    '''
+
+    :param X_train: 输入的训练集x
+    :param Y_train: 输入的训练集y
+    :param savepath: 保存图的位置
+    :param columns: 输入的因子名称
+    :param v: 版本号
+    :return: 返回提取的编号
+    '''
+    from sklearn.linear_model import Lasso
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.metrics import r2_score
+    import matplotlib.pyplot as plt
+    from sklearn.model_selection import train_test_split
+    from sklearn.linear_model import LassoCV
+    sc = StandardScaler()
+    X_train_pre = sc.fit_transform(X_train)
+    linreg = LassoCV(max_iter=10000)
+    linreg.fit(X_train_pre, y_train)
+    plt.switch_backend('agg')
+    import seaborn as sns
+    color = sns.color_palette()
+    sns.set_style('darkgrid')
+    coef = pd.Series(linreg.coef_, index=columns)
+    imp_coef = coef.sort_values()
+    weight = np.array(linreg.coef_)
+    h=np.where(weight!=0)[0]
+    plt.rcParams['figure.figsize'] = (12.5, 10.0)
+    imp_coef.plot(kind="barh", fontsize=12, grid=True)
+    plt.xlabel('Weight in Lasso model', fontsize=14)
+    plt.ylabel('parameters', fontsize=14)
+    plt.title('version='+str(v), fontsize=20)
+    plt.savefig(savepath)
+    return list(h)
+
+v=3#1和2的区别主要是h的值，1用的是lasso筛选后的，2用的是全部
+'''
+v=0 only monthly mean as feature'
+v=1 每个站点每一年的品种计算平均值'
+v=2 同1，但是不因子筛选',
+v=3 同1，但是每一个站点每一年品种计算中位数',
+v=4 同3，但是没有lasso因子筛选'
+v=5 添加一个积温列，添加一个品种的平均值两列(数据用的是中位数，表明50%的葡萄都抽芽了的时间)
+v=6 train and test dataset chose 不同的时间段
+'''
+
+'''
+1.这步骤是找到所有站点在网格x,y上的索引
+'''
+station_file = './sites.csv'
+site_id = pd.read_csv(station_file, sep=";").loc[:,["site id"]].values.reshape(-1,1)
+site_lat = pd.read_csv(station_file, sep=";").loc[:,["latitude"]].values.reshape(-1,1)
+site_lon = pd.read_csv(station_file, sep=";").loc[:,["longitude"]].values.reshape(-1,1)
+temp_data = nc.Dataset('./SAFRAN_tas_1958-2015_int.nc')
+lon = temp_data['lon'][:]
+lat = temp_data['lat'][:]
+lon_idx = np.zeros((len(site_id),1))
+lat_idx = np.zeros((len(site_id),1))
+for i in range (len(site_id)):
+    lon_idx[i,0] = geo_idx(site_lon[i],lon)
+    lat_idx[i,0] = geo_idx(site_lat[i],lat)
+site_all_idx = np.concatenate((site_id,lon_idx,lat_idx,site_lon,site_lat),axis=1)
+print('site_all_indx=台站号，经度编号，纬度编号，经度数值，纬度数值')
+
+'''
+2. 开始生成训练数据。
+物候日期，年份，经度，纬度，品种，平均温度8.9.10，11，12，1，2，3，4
+cdo monmean input output
+'''
+start_year = 1959
+end_year = 2015
+filename = './common_variables.csv'
+phe_data = find_year(start_year, end_year, filename)
+print('phe_data= "year", "day_of_year", "site_id", "site_latitude", "site_longitude", "taxon_id"')
+print('start_year=1958年8月， end_year=2015年7月')
+filename='./SAFRAN_tas_1958-2015_monmean.nc'
+[year_nc,month_nc,day_nc]=find_nc_year_month_day(filename)#提取数据
+print('整体数据年月日的提取')
+#提取观测的数据
+year_obs = phe_data.loc[:, ["year"]].values
+p_obs = phe_data.loc[:, ["day_of_year"]].values
+site_id_obs = phe_data.loc[:, ["site_id"]].values  # 观测文件的站点名字
+site_longitude = phe_data.loc[:, ["site_longitude"]].values  # 观测文件的经度
+site_latitude = phe_data.loc[:, ["site_latitude"]].values  # 观测文件的纬度
+var=phe_data.loc[:,["taxon_id"]].values
+var[var==2890]=10;var[var==3611]=15;var[var==2933]=20;var[var==2899]=25;var[var==2895]=30;var[var==2938]=35;var[var==3369]=40;var[var==2920]=45;var[var==2897]=50;var[var==2922]=55;var[var==2948]=60;var[var==2891]=65;
+
+'''
+先提取所有的站点，遍历站点名，例如站点1
+站点1之后，遍历所有的年份，例如2013
+然后遍历品种，例如品种1，把年份找到，然后计算平均值，最大值，最小值，方差，个数。然后存成一个多列的文件，包括
+最后生成的文件——————站点id，经度，纬度，年份，品种，平均值，最大值，最小值，方差，数据个数
+'''
+year=[]
+site=[]
+plon=[]
+plat=[]
+taxon=[]
+pmean=[]
+pmax=[]
+pmin=[]
+prvar=[]
+pnumber=[]
+len_id = np.array(list(set(list(site_id_obs.reshape(-1, )))))  # 一共多少个站点
+for i in range(len_id.shape[0]):
+    site_data_i = np.where(site_id_obs == len_id[i,])[0]  # 一共这个站点有多少数据
+    lon_i=site_longitude[site_data_i[0]]
+    lat_i=site_latitude[site_data_i[0]]
+    year_i_site = year_obs[site_data_i, 0]  # 这个站点里面的年份数据
+    phen_i_site = p_obs[site_data_i, 0]  # 这个站点里面的物候数据
+    taxon_i_site = var[site_data_i, 0]  # 这个站点里面的品种数据
+    # 找到重复的年份
+    year_len_all = np.array(list(set(list(year_i_site.reshape(-1, )))))
+    for j in range(year_len_all.shape[0]):
+        site_data_i_j = np.where(year_i_site == year_len_all[j])[0]  # 一共这个站点,这个年份有多少数据
+        phen_i_j_site = phen_i_site[site_data_i_j]
+        taxon_i_j_site = taxon_i_site[site_data_i_j]
+        taxon_len_all = np.array(list(set(list(taxon_i_j_site.reshape(-1, )))))
+        for m in range(taxon_len_all.shape[0]):
+            site_data_i_j_m = np.where(taxon_i_j_site == taxon_len_all[m])[0]  # 一共这个站点,这个年份,这个品种有多少数据
+            phen_i_j_m_site = phen_i_j_site[site_data_i_j_m]
+            phen_mean = np.nanmedian(phen_i_j_m_site)
+            phen_min = np.nanmin(phen_i_j_m_site)
+            phen_max = np.nanmax(phen_i_j_m_site)
+            phen_var = np.var(phen_i_j_m_site)
+            number_last = site_data_i_j.shape[0]
+            site.append(len_id[i])
+            year.append(year_len_all[j])
+            taxon.append(taxon_len_all[m])
+            plon.append(lon_i)
+            plat.append(lat_i)
+            pmean.append(phen_mean)
+            pmax.append(phen_max)
+            pmin.append(phen_min)
+            prvar.append(phen_var)
+            pnumber.append(number_last)
+
+new_data=np.concatenate((np.array(year).reshape(-1,1),np.array(pmean).reshape(-1,1),np.array(site).reshape(-1,1),np.array(plat).reshape(-1,1),np.array(plon).reshape(-1,1),np.array(taxon).reshape(-1,1),np.array(pmax).reshape(-1,1),np.array(pmin).reshape(-1,1),np.array(prvar).reshape(-1,1),np.array(pnumber).reshape(-1,1)),axis=1)
+
+path_all_data = './phenology_data_mean_'+str(v)+'.csv'
+columns=['year','day_of_year_mean','site_id','site_latitude','site_longitude','taxon_id','day_of_year_max','day_of_year_min','var','sample_size']
+df = pd.DataFrame(new_data, columns=columns)
+df.to_csv(path_all_data)
+
+
+'''
+重新计算数据
+'''
+filename=path_all_data
+phe_all = pd.read_csv(filename, sep=",")  # phe_data.iloc[0,0]
+phe_data = phe_all.loc[:, ["year", "day_of_year_mean", "site_id", "site_latitude", "site_longitude", "taxon_id"]]
+
+filename='./SAFRAN_tas_1958-2015_monmean.nc'
+[year_nc,month_nc,day_nc]=find_nc_year_month_day(filename)#提取数据
+
+#提取观测的数据
+year_obs = phe_data.loc[:, ["year"]].values
+p_obs = phe_data.loc[:, ["day_of_year_mean"]].values
+site_id_obs = phe_data.loc[:, ["site_id"]].values  # 观测文件的站点名字
+site_longitude = phe_data.loc[:, ["site_longitude"]].values  # 观测文件的经度
+site_latitude = phe_data.loc[:, ["site_latitude"]].values  # 观测文件的纬度
+var=phe_data.loc[:,["taxon_id"]].values
+
+temp_mon = nc.Dataset('./SAFRAN_tas_1958-2015_monmean.nc')
+tas = temp_mon['TAS'][:] - 273.15
+tas[tas<-500]=np.nan
+sta = 8
+end = 4
+tas_8_4 = np.zeros((year_obs.shape[0], end + 12 - sta + 1))
+cons_feature = np.zeros((year_obs.shape[0], 4))#年份，经度，纬度，品种
+label = np.zeros((year_obs.shape[0], 1))
+for i in range(year_obs.shape[0]):
+    year_pi = year_obs[i, :][0]
+    site_id_pi = site_id_obs[i][0]
+    site_lon_pi = site_longitude[i][0]
+    site_lat_pi = site_latitude[i][0]
+    site_loc = np.where(site_all_idx[:, 0] == site_id_pi)
+    site_nci = site_all_idx[site_loc, 0]
+    lon_nci = site_all_idx[site_loc, 1][0].astype('int')
+    lat_nci = site_all_idx[site_loc, 2][0].astype('int')
+    data_loc_tas = find_month_a_b(sta, end, year_nc, year_pi,month_nc)
+    tas_8_4[i, :] = tas[data_loc_tas, lat_nci[0], lon_nci[0]].data.reshape(1, -1)
+    label[i, :] = p_obs[i]
+    cons_feature[i, 0] = year_pi
+    cons_feature[i, 1] = site_lon_pi
+    cons_feature[i, 2] = site_lat_pi
+    cons_feature[i, 3] = var[i]
+
+x = np.concatenate((cons_feature, tas_8_4), axis=1)
+y = label.reshape(-1,)
+x = np.delete(x, np.where(y == np.nanmax(y)), axis=0)
+y = np.delete(y, np.where(y == np.nanmax(y)), axis=0)
+X_train, X_test, y_train, y_test = train_test_split(x,
+                                                    y,
+                                                    test_size=0.3,
+                                                    random_state=0)
+y_train=np.delete(y_train, np.where(np.isnan(X_train)), axis=0)
+X_train = np.delete(X_train, np.where(np.isnan(X_train)), axis=0)
+y_test=np.delete(y_test, np.where(np.isnan(X_test)), axis=0)
+X_test = np.delete(X_test, np.where(np.isnan(X_test)), axis=0)
+
+
+
+#因子筛选
+month=['Jan', 'Feb', 'Mar', 'Apr','May','Jun','Jul','Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+columns=list(np.concatenate((np.array(['year', 'lon', 'lat', 'variety']),np.array(month[sta-1:]),np.array(month[:end])),axis=0))
+savepath='./output/figure/lasso_weight'+str(v)+'.png'
+from sklearn.preprocessing import StandardScaler
+sc = StandardScaler()
+X_train_z=sc.fit_transform(X_train)
+h=lasso_feature_selection(X_train_z,y_train,savepath,columns,v)
+#h=np.arange(X_train.shape[1])#所有的都选上
+mean_x = np.nanmean(X_train[:,h], 0)
+var_x = np.std(X_train[:,h], 0)#标准差
+np.savez('./train_test/normal_v'+str(v)+'.npz', avg=mean_x, var=var_x)
+
+# 保存csv
+path_xtrain = './train_test/X_train_v'+str(v)+'.csv'
+columns=list(np.concatenate((np.array(['year', 'lon', 'lat', 'variety']),np.array(month[sta-1:]),np.array(month[:end])),axis=0))
+df = pd.DataFrame(X_train[:,h], columns=list(np.array(columns)[h]))
+df.to_csv(path_xtrain)
+
+path_xtest = './train_test/X_test_v'+str(v)+'.csv'
+df = pd.DataFrame(X_test[:,h], columns=list(np.array(columns)[h]))
+df.to_csv(path_xtest)
+
+path_ytrain = './train_test/y_train_v'+str(v)+'.csv'
+columns = ['pheonology_date']
+df = pd.DataFrame(y_train, columns=columns)
+df.to_csv(path_ytrain)
+
+path_ytest = './train_test/y_test_v'+str(v)+'.csv'
+columns = ['pheonology_date']
+df = pd.DataFrame(y_test, columns=columns)
+df.to_csv(path_ytest)
+
+
+
+#baseline random forest
+
+from sklearn.ensemble import RandomForestRegressor
+from sklearn import metrics
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import StandardScaler
+X_train=X_train[:,h]
+X_test=X_test[:,h]
+regressor = RandomForestRegressor(n_estimators=50, max_depth=50, random_state=0, oob_score=True)
+sc = StandardScaler()
+X_train=sc.fit_transform(X_train)
+X_test=sc.transform(X_test)
+regressor.fit(X_train, y_train.reshape(-1,))
+y_test_pred = regressor.predict(X_test)
+
+fig = plt.figure(figsize=(16, 10))
+xp = np.array(range(len(y_test_pred)))
+plt.plot(xp[0:200], y_test_pred[0:200], 'k', label='y_model', linewidth=2)
+plt.plot(xp[0:200], y_test[0:200], 'r', label='y_true', linewidth=2)
+
+plt.text(0, np.nanmax(y_test), 'Model: MAE=' + str(np.round(metrics.mean_absolute_error(y_test, y_test_pred), 3)), fontsize=14)
+plt.text(30, np.nanmax(y_test), 'RMSE=' + str(np.round(np.sqrt(metrics.mean_squared_error(y_test, y_test_pred)), 3)), fontsize=14)
+plt.text(60, np.nanmax(y_test), 'EF=' + str(np.round(1-(((metrics.mean_squared_error(y_test, y_test_pred))/np.var(y_test))),3)), fontsize=14)
+
+plt.legend(fontsize=18, loc='upper right', frameon=False)
+plt.xticks(fontsize=18)
+plt.yticks(fontsize=18)
+plt.xlabel('each observation', fontsize=18)
+plt.ylabel('phenology date', fontsize=18)
+plt.savefig('./output/figure/plotline_baseline_RF_'+str(v)+'.png',
+            format='png', dpi=100)
+
+
+
+
+
+
+
